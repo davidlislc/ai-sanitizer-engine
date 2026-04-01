@@ -1,51 +1,63 @@
 #!/bin/bash
 
-# Source sanitization library
+# -------- LOAD LIB --------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/bin/san_lib.sh"
-source "$SCRIPT_DIR/bin/kafka_lib.sh"
-source "$SCRIPT_DIR/bin/db_lib.sh"
-source "$SCRIPT_DIR/bin/file_lib.sh"
+source "$SCRIPT_DIR/libs/db_lib.sh"
 
-# Configuration
-QUARANTINE_DIR="./quarantine"
-OUTPUT_DIR="./sanitized_output"
-mkdir -p "$QUARANTINE_DIR" "$OUTPUT_DIR"
+echo "[+] Reading latest PENDING job..."
 
-# --- Main Logic ---
+JOB_DATA=$(read_latest_job_request)
 
-if [ "$#" -lt 2 ]; then
-    echo "Usage: $0 <file_path> <LogType>"
-    echo "Example: $0 network.pcap PCAP"
-    exit 1
+if [ -z "$JOB_DATA" ]; then
+  echo "[!] No PENDING jobs found"
+  exit 0
 fi
 
-FILE_PATH=$1
-TYPE=$2
+# -------- SAFE PARSING (TAB-BASED) --------
+IFS=$'\t' read -r JOB_ID FILE_NAME CONTENT_TYPE FILE_B64 <<< "$JOB_DATA"
 
-if verify_log "$FILE_PATH" "$TYPE"; then
-    SANITIZED_FILE="$OUTPUT_DIR/$(basename "$FILE_PATH")"
+echo "[+] Job ID: $JOB_ID"
+insert_report "$JOB_ID" "STARTED" "Job started"
 
-    case "$TYPE" in
-        PCAP|PCAPNG|CAP)
-            sanitize_pcap "$FILE_PATH"
-            send_file_to_topic "$SANITIZED_FILE" "networklog_in"
-            ;;
-        JSON)
-            sanitize_json "$FILE_PATH"
-            send_file_to_topic "$SANITIZED_FILE" "systemlog_in"
-            ;;
-        CSV|LOG|EVTX)
-            sanitize_text "$FILE_PATH"
-            send_file_to_topic "$SANITIZED_FILE" "systemlog_in"
-            ;;
-        *)
-            echo "[!] Unknown LogType: $TYPE"
-            return 1
-            ;;
-    esac
+# -------- DECODE FILE --------
+TMP_FILE="tmp_$FILE_NAME"
+
+echo "$FILE_B64" | base64 -d > "$TMP_FILE"
+
+echo "[+] File decoded"
+insert_report "$JOB_ID" "PROCESSING" "File decoded from database"
+
+# -------- SIMULATE PROCESSING --------
+echo "[+] Processing file..."
+sleep 2
+
+insert_report "$JOB_ID" "PROCESSING" "File processed (simulated)"
+
+# -------- SEND TO KAFKA --------
+echo "[+] Sending to Kafka..."
+
+docker exec -i dev-kafka-1 kafka-console-producer \
+--bootstrap-server localhost:9092 \
+--topic sanitizer_in <<EOF
+$(cat "$TMP_FILE")
+EOF
+
+if [ $? -eq 0 ]; then
+  echo "[+] Kafka send successful"
+  insert_report "$JOB_ID" "PROCESSING" "Sent to Kafka topic sanitizer_in"
 else
-    echo "[!] Verification FAILED. Quarantining $FILE_PATH"
-    mv "$FILE_PATH" "$QUARANTINE_DIR/"
-    exit 1
+  echo "[!] Kafka send failed"
+  insert_report "$JOB_ID" "FAILED" "Kafka send failed"
+  exit 1
 fi
+
+# -------- UPDATE STATUS --------
+update_job_request_status "$JOB_ID" "COMPLETED"
+insert_report "$JOB_ID" "COMPLETED" "Job completed successfully"
+
+echo "[+] Job completed"
+
+# -------- CLEANUP --------
+rm -f "$TMP_FILE"
+
+echo "[+] Done"
