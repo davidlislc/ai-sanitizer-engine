@@ -1,0 +1,9 @@
+Steps completed:
+-inserted CSV into request table
+-encoded CSV using base64
+-sent payload to kafka using sendkafka.sh
+-verified message in Redpanda UI
+
+Commands used:
+PAYLOAD=$(base64 test_output.csv | tr -d '\n')
+./sendkafka.sh "$PAYLOAD"
